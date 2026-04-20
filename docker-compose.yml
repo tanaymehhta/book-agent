@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: lookout_db
+    environment:
+      POSTGRES_USER: lookout
+      POSTGRES_PASSWORD: lookout
+      POSTGRES_DB: lookout
+    ports:
+      - "5434:5432"
+    volumes:
+      - lookout_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lookout"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  lookout_pgdata:

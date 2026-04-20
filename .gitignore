@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+agent/.env
+agent/secrets/
+!agent/secrets/.gitkeep
+node_modules/
+.next/
+dist/
+build/
+.DS_Store
+*.log
