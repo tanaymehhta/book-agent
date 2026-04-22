@@ -2,8 +2,83 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --paper: #f6f3ec;
+  --paper-2: #efeadb;
+  --paper-deep: #e4ddca;
+  --ink: #1a1a17;
+  --ink-2: #3a3a34;
+  --ink-3: #6f6a61;
+  --ink-4: #a8a298;
+  --accent: #b85a3e;
+  --accent-deep: #8e3f26;
+  --accent-soft: #ecc9b8;
+  --moss: #4a6747;
+  --moss-soft: #cfdbca;
+  --ocean: #3b5f76;
+  --ocean-soft: #cbd6df;
+  --amber: #b8893a;
+  --amber-soft: #e8d6b0;
+  --line: rgba(26, 26, 23, 0.08);
+  --line-strong: rgba(26, 26, 23, 0.16);
+}
+
 html, body {
-  background: #0e1116;
-  color: #e6edf3;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background:
+    radial-gradient(900px 500px at 15% -5%, rgba(184, 90, 62, 0.06), transparent 60%),
+    radial-gradient(800px 600px at 100% 105%, rgba(74, 103, 71, 0.05), transparent 60%),
+    var(--paper);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0 0.09 0 0 0 0.35 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  opacity: 0.045;
+  mix-blend-mode: multiply;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+
+.fade-up { animation: fade-up 500ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.slide-in { animation: slide-in 340ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.pulse-soft { animation: pulse-soft 1.6s ease-in-out infinite; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; border: 2px solid transparent; }
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--ink);
 }
