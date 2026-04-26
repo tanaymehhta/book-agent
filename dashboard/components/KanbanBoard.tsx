@@ -115,6 +115,15 @@ export function KanbanBoard() {
               </svg>
               Refresh
             </button>
+            <form method="POST" action="/api/logout">
+              <button
+                type="submit"
+                className="inline-flex items-center rounded-full border border-line-strong bg-paper-2 px-3.5 py-1.5 text-[13px] font-[500] text-ink-3 transition hover:border-ink/30 hover:bg-paper-deep hover:text-ink-2"
+                aria-label="Log out"
+              >
+                Log out
+              </button>
+            </form>
           </div>
         </div>
 

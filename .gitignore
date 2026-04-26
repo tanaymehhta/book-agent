@@ -14,3 +14,4 @@ dist/
 build/
 .DS_Store
 *.log
+DEPLOY_PLAN.md

@@ -7,6 +7,7 @@ refresh token stored at GMAIL_TOKEN_PATH. Subsequent runs refresh silently.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -33,6 +34,21 @@ log = logging.getLogger(__name__)
 # Full-access scope for a dedicated booking inbox. Simplest to operate; if we
 # ever narrow, use readonly + send + compose + modify together.
 SCOPES = ["https://mail.google.com/"]
+
+
+def _load_credentials_from_json(token_json: str) -> Credentials:
+    """Load creds from a JSON string (env-var path, used in deployed envs)."""
+    info = json.loads(token_json)
+    creds = Credentials.from_authorized_user_info(info, SCOPES)
+    if creds.valid:
+        return creds
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        return creds
+    raise RuntimeError(
+        "GMAIL_TOKEN_JSON is invalid or has no usable refresh token. "
+        "Re-run the OAuth flow locally and update the env var."
+    )
 
 
 def _load_credentials(client_secrets: Path, token_path: Path) -> Credentials:
@@ -67,15 +83,18 @@ class GmailProvider(EmailProvider):
     def __init__(self) -> None:
         settings = get_settings()
         self.user_email = settings.gmail_user_email
-        # Resolve secrets paths relative to the agent/ working dir so Makefile
-        # can run from the repo root or agent/ interchangeably.
-        base = Path.cwd()
-        client = base / settings.gmail_client_secrets
-        token = base / settings.gmail_token_path
-        if not client.exists() and (base / "agent" / settings.gmail_client_secrets).exists():
-            client = base / "agent" / settings.gmail_client_secrets
-            token = base / "agent" / settings.gmail_token_path
-        self._creds = _load_credentials(client, token)
+
+        if settings.gmail_token_json:
+            self._creds = _load_credentials_from_json(settings.gmail_token_json)
+        else:
+            base = Path.cwd()
+            client = base / settings.gmail_client_secrets
+            token = base / settings.gmail_token_path
+            if not client.exists() and (base / "agent" / settings.gmail_client_secrets).exists():
+                client = base / "agent" / settings.gmail_client_secrets
+                token = base / "agent" / settings.gmail_token_path
+            self._creds = _load_credentials(client, token)
+
         self._service = build("gmail", "v1", credentials=self._creds, cache_discovery=False)
 
     # ---- Ingestion ---------------------------------------------------------

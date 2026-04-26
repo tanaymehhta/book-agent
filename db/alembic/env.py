@@ -21,6 +21,10 @@ database_url = os.environ.get(
     "DATABASE_URL",
     "postgresql+psycopg://lookout:lookout@localhost:5434/lookout",
 )
+if database_url.startswith("postgresql://"):
+    database_url = "postgresql+psycopg://" + database_url[len("postgresql://"):]
+elif database_url.startswith("postgres://"):
+    database_url = "postgresql+psycopg://" + database_url[len("postgres://"):]
 config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = Base.metadata
