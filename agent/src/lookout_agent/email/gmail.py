@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr, parsedate_to_datetime
@@ -71,7 +72,13 @@ def _load_credentials(client_secrets: Path, token_path: Path) -> Credentials:
         )
 
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets), SCOPES)
-    creds = flow.run_local_server(port=0)
+    # Some environments can't launch a browser automatically (headless shells,
+    # remote terminals, etc.). Allow forcing a manual open flow (prints a URL).
+    oauth_mode = (os.environ.get("GMAIL_OAUTH_MODE") or "").strip().lower()
+    if oauth_mode in {"manual", "headless"}:
+        creds = flow.run_local_server(port=0, open_browser=False)
+    else:
+        creds = flow.run_local_server(port=0)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json())
     return creds
@@ -96,6 +103,10 @@ class GmailProvider(EmailProvider):
             self._creds = _load_credentials(client, token)
 
         self._service = build("gmail", "v1", credentials=self._creds, cache_discovery=False)
+
+    def mailbox_identity_email(self) -> str:
+        profile = self._service.users().getProfile(userId="me").execute()
+        return str(profile["emailAddress"])
 
     # ---- Ingestion ---------------------------------------------------------
 

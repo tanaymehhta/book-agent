@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import useSWR from 'swr';
-import type { BandInsights, BandRow } from '@/lib/types';
+import type { BandInsights, BandRow, BandStatus } from '@/lib/types';
 import { daysSince, timeAgo } from '@/lib/format';
 
 const STAGE_LABELS: Record<string, string> = {
@@ -20,13 +20,114 @@ interface BandCardProps {
   onClick?: () => void;
   onDelete?: (band: BandRow) => void;
   deleting?: boolean;
+  onMove?: (band: BandRow, newStatus: BandStatus) => void;
+  moving?: boolean;
 }
 
-export function BandCard({ band, onClick, onDelete, deleting = false }: BandCardProps) {
+export function BandCard({
+  band,
+  onClick,
+  onDelete,
+  deleting = false,
+  onMove,
+  moving = false,
+}: BandCardProps) {
   if (band.status === 'approved') {
-    return <ApprovedCard band={band} onClick={onClick} onDelete={onDelete} deleting={deleting} />;
+    return (
+      <ApprovedCard
+        band={band}
+        onClick={onClick}
+        onDelete={onDelete}
+        deleting={deleting}
+        onMove={onMove}
+        moving={moving}
+      />
+    );
   }
-  return <FullCard band={band} onClick={onClick} onDelete={onDelete} deleting={deleting} />;
+  return (
+    <FullCard
+      band={band}
+      onClick={onClick}
+      onDelete={onDelete}
+      deleting={deleting}
+      onMove={onMove}
+      moving={moving}
+    />
+  );
+}
+
+const NEXT_STATUS: Record<BandStatus, BandStatus | null> = {
+  incoming: 'in_conversation',
+  in_conversation: 'approved',
+  approved: null,
+  archived: null,
+};
+
+const PREV_STATUS: Record<BandStatus, BandStatus | null> = {
+  incoming: null,
+  in_conversation: 'incoming',
+  approved: 'in_conversation',
+  archived: null,
+};
+
+const STATUS_SHORT_LABELS: Record<BandStatus, string> = {
+  incoming: 'incoming',
+  in_conversation: 'in conv.',
+  approved: 'roster',
+  archived: 'archived',
+};
+
+function MoveControls({
+  band,
+  onMove,
+  moving,
+  variant,
+}: {
+  band: BandRow;
+  onMove?: (band: BandRow, newStatus: BandStatus) => void;
+  moving?: boolean;
+  variant: 'inline' | 'overlay';
+}) {
+  if (!onMove) return null;
+  const next = NEXT_STATUS[band.status];
+  const prev = PREV_STATUS[band.status];
+  if (!next && !prev) return null;
+
+  const baseBtn =
+    variant === 'overlay'
+      ? 'rounded-full border border-line-strong bg-paper px-2 py-0.5 text-[10px] font-[500] text-ink-3 transition hover:border-ink/30 hover:text-ink-2 disabled:opacity-50'
+      : 'text-[11px] font-[500] text-ink-3 transition hover:text-ink-2 disabled:opacity-50';
+
+  return (
+    <div className={variant === 'overlay' ? 'flex items-center gap-1.5' : 'flex items-center gap-2'}>
+      {prev && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onMove(band, prev);
+          }}
+          disabled={moving}
+          className={baseBtn}
+          title={`Move back to ${STATUS_SHORT_LABELS[prev]}`}
+        >
+          {moving ? '…' : `← ${STATUS_SHORT_LABELS[prev]}`}
+        </button>
+      )}
+      {next && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onMove(band, next);
+          }}
+          disabled={moving}
+          className={baseBtn}
+          title={`Move forward to ${STATUS_SHORT_LABELS[next]}`}
+        >
+          {moving ? '…' : `${STATUS_SHORT_LABELS[next]} →`}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function ApprovedCard({
@@ -34,11 +135,15 @@ function ApprovedCard({
   onClick,
   onDelete,
   deleting,
+  onMove,
+  moving,
 }: {
   band: BandRow;
   onClick?: () => void;
   onDelete?: (band: BandRow) => void;
   deleting?: boolean;
+  onMove?: (band: BandRow, newStatus: BandStatus) => void;
+  moving?: boolean;
 }) {
   return (
     <div
@@ -60,18 +165,21 @@ function ApprovedCard({
           roster
         </span>
       </div>
-      {onDelete && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(band);
-          }}
-          disabled={deleting}
-          className="absolute right-2 top-2 text-[10px] font-[500] text-ink-4 opacity-0 transition hover:text-accent group-hover:opacity-100 disabled:opacity-50"
-        >
-          {deleting ? '…' : 'remove'}
-        </button>
-      )}
+      <div className="absolute right-2 top-2 flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
+        <MoveControls band={band} onMove={onMove} moving={moving} variant="overlay" />
+        {onDelete && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(band);
+            }}
+            disabled={deleting}
+            className="text-[10px] font-[500] text-ink-4 transition hover:text-accent disabled:opacity-50"
+          >
+            {deleting ? '…' : 'remove'}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -81,11 +189,15 @@ function FullCard({
   onClick,
   onDelete,
   deleting,
+  onMove,
+  moving,
 }: {
   band: BandRow;
   onClick?: () => void;
   onDelete?: (band: BandRow) => void;
   deleting?: boolean;
+  onMove?: (band: BandRow, newStatus: BandStatus) => void;
+  moving?: boolean;
 }) {
   const stale = daysSince(band.last_activity_at) >= 14;
   const awaitingReply = band.last_direction === 'outbound';
@@ -149,6 +261,7 @@ function FullCard({
               {STAGE_LABELS[band.conversation_stage] ?? band.conversation_stage}
             </span>
           )}
+          <MoveControls band={band} onMove={onMove} moving={moving} variant="inline" />
           <button
             onClick={(e) => {
               e.stopPropagation();

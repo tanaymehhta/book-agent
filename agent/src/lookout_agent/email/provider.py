@@ -128,6 +128,12 @@ class EmailProvider(ABC):
     def discard_draft(self, provider_draft_id: str) -> None:
         """Delete a draft without sending."""
 
+    # ---- Identity (authenticated mailbox) ----------------------------------
+
+    @abstractmethod
+    def mailbox_identity_email(self) -> str:
+        """OAuth-connected mailbox address this agent uses for ingestion/send."""
+
     # ---- Attachments -------------------------------------------------------
 
     @abstractmethod

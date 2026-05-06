@@ -49,7 +49,13 @@ def ingest_message(msg: NormalizedMessage, provider: EmailProvider) -> None:
             return
 
         # Ignore messages from our own mailbox reaching us somehow
-        if msg.from_address.email.lower() == settings.gmail_user_email.lower():
+        our_mailbox = settings.gmail_user_email.strip().lower()
+        if msg.from_address.email.lower() == our_mailbox:
+            log.info(
+                "Skipping inbound whose From matches GMAIL_USER_EMAIL (%s); msg=%s",
+                our_mailbox,
+                msg.provider_message_id,
+            )
             return
 
         sender = msg.from_address.email.lower()
@@ -109,25 +115,45 @@ def ingest_message(msg: NormalizedMessage, provider: EmailProvider) -> None:
                 msg.provider_thread_id,
             )
 
-        # Auto-reply conditions (unified):
-        #   - first contact on a new inquiry (no prior outbound, confidence gate), OR
-        #   - any inbound that bumped the band into active conversation
+        # Engine policy:
+        #   - First contact on a new inquiry (no prior outbound, confidence gate):
+        #     run engine and SEND the reply (the agent's one-and-only auto-reply).
+        #   - Any later inbound on an active band (in_conversation or approved):
+        #     run engine and SAVE the reply as a pending Gmail draft for Laura
+        #     instead of sending. Stage/approval updates still apply, so the
+        #     band can still auto-promote to 'approved'. Laura reviews/edits/
+        #     sends drafts from the dashboard.
         is_first_contact = (
             classification == Classification.new_inquiry
             and confidence >= AUTO_REPLY_CONFIDENCE
             and prior_outbound_count == 0
         )
-        should_run_engine = (
-            is_first_contact or band.status == BandStatus.in_conversation
-        ) and _auto_reply_enabled()
+        is_active_band = band.status in (
+            BandStatus.in_conversation,
+            BandStatus.approved,
+        )
+
+        if not _auto_reply_enabled():
+            engine_mode: str | None = None
+        elif is_first_contact:
+            engine_mode = "send"
+        elif is_active_band:
+            engine_mode = "detect_only"
+        else:
+            engine_mode = None
 
         # Capture values needed post-commit
         band_id = band.id
         thread_id = thread.id
 
     # Commit happens; now do side-effects outside the transaction
-    if should_run_engine:
-        _run_reply_engine(band_id=band_id, thread_id=thread_id, provider=provider)
+    if engine_mode is not None:
+        _run_reply_engine(
+            band_id=band_id,
+            thread_id=thread_id,
+            provider=provider,
+            send_reply=(engine_mode == "send"),
+        )
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -280,7 +306,12 @@ def _handle_outbound(s: Session, msg: NormalizedMessage, provider_name: str) -> 
     if thread is None:
         # We don't know this thread yet (e.g. Laura started a cold outreach
         # manually before we saw any inbound). Skip for V1; can be handled later.
-        log.debug("Outbound on unknown thread %s — skipping", msg.provider_thread_id)
+        log.info(
+            "Skipping outbound on unknown thread %s (no matching email_threads row); "
+            "send/receive at least one inbound to this inbox first, or start from a reply. msg=%s",
+            msg.provider_thread_id,
+            msg.provider_message_id,
+        )
         return
 
     band = s.get(Band, thread.band_id)
@@ -310,8 +341,18 @@ def _handle_outbound(s: Session, msg: NormalizedMessage, provider_name: str) -> 
     )
 
 
-def _run_reply_engine(band_id, thread_id, provider: EmailProvider) -> None:
-    """Run the multi-turn reply engine for an active conversation."""
+def _run_reply_engine(
+    band_id, thread_id, provider: EmailProvider, *, send_reply: bool
+) -> None:
+    """Run the reply engine for an active conversation.
+
+    When send_reply=True (first inbound on a new inquiry only), a generated
+    reply is sent immediately. When send_reply=False (every later inbound), a
+    generated reply is saved as a pending Gmail draft for Laura to review,
+    edit, and send from the dashboard. Stage/approval updates always apply.
+    """
+    from .db.enums import DraftCreatedBy, DraftStatus
+    from .db.models import Draft
     from .reply_engine import NextAction, decide_next_action
 
     with session_scope() as s:
@@ -323,8 +364,9 @@ def _run_reply_engine(band_id, thread_id, provider: EmailProvider) -> None:
         decision = decide_next_action(s, band, thread)
 
         transition_log.info(
-            "REPLY_ENGINE | band=%s action=%s confidence=%.2f stage=%s reason=%s",
+            "REPLY_ENGINE | band=%s mode=%s action=%s confidence=%.2f stage=%s reason=%s",
             band_id,
+            "send" if send_reply else "draft_for_laura",
             decision.action.value,
             decision.confidence,
             decision.stage_update.value if decision.stage_update else "unchanged",
@@ -370,33 +412,66 @@ def _run_reply_engine(band_id, thread_id, provider: EmailProvider) -> None:
                 )
 
         elif decision.action == NextAction.reply_draft and decision.draft_text:
-            # Auto-send reply (no human-in-the-loop).
-            try:
-                to_email = (band.primary_email or "").strip()
-                if not to_email:
-                    log.warning("Cannot send reply: band %s has no primary_email", band_id)
-                    return
+            to_email = (band.primary_email or "").strip()
+            if not to_email:
+                log.warning("Cannot reply: band %s has no primary_email", band_id)
+                return
 
-                sent = provider.send_message(
-                    to=[to_email],
-                    subject=thread.subject or "",
-                    body_text=decision.draft_text,
-                    reply_to_thread_id=thread.provider_thread_id,
-                )
+            if send_reply:
+                # First-contact auto-reply: send immediately.
+                try:
+                    sent = provider.send_message(
+                        to=[to_email],
+                        subject=thread.subject or "",
+                        body_text=decision.draft_text,
+                        reply_to_thread_id=thread.provider_thread_id,
+                    )
 
-                _insert_message(s, thread, sent, classification=None, auto_sent=False)
-                thread.last_message_at = sent.sent_at
-                band.last_activity_at = sent.sent_at
-                band.draft_ready = False
+                    _insert_message(s, thread, sent, classification=None, auto_sent=False)
+                    thread.last_message_at = sent.sent_at
+                    band.last_activity_at = sent.sent_at
+                    band.draft_ready = False
 
-                transition_log.info(
-                    "AUTO_SENT_REPLY | band=%s msg=%s thread=%s",
-                    band_id,
-                    sent.provider_message_id,
-                    sent.provider_thread_id,
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("Failed to auto-send agent reply for band=%s", band_id)
+                    transition_log.info(
+                        "AUTO_SENT_REPLY | band=%s msg=%s thread=%s",
+                        band_id,
+                        sent.provider_message_id,
+                        sent.provider_thread_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("Failed to auto-send agent reply for band=%s", band_id)
+            else:
+                # Follow-up: save as a pending Gmail draft for Laura to review.
+                try:
+                    draft_ref = provider.create_draft(
+                        body_text=decision.draft_text,
+                        reply_to_thread_id=thread.provider_thread_id,
+                        to=[to_email],
+                        subject=thread.subject or "",
+                    )
+
+                    s.add(
+                        Draft(
+                            band_id=band.id,
+                            thread_id=thread.id,
+                            provider=provider.provider_name,
+                            provider_draft_id=draft_ref.provider_draft_id,
+                            body_text=decision.draft_text,
+                            status=DraftStatus.pending,
+                            created_by=DraftCreatedBy.agent,
+                        )
+                    )
+                    band.draft_ready = True
+
+                    transition_log.info(
+                        "AGENT_DRAFT_CREATED | band=%s thread=%s provider_draft=%s",
+                        band_id,
+                        thread.provider_thread_id,
+                        draft_ref.provider_draft_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("Failed to create agent draft for band=%s", band_id)
+                    band.needs_review = True
 
         elif decision.action == NextAction.needs_human:
             band.needs_review = True

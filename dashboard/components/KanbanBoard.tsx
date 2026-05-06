@@ -8,6 +8,20 @@ import { ThreadPanel } from './ThreadPanel';
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
+type MailboxPayload = { email: string; provider: string };
+
+async function mailboxFetcher(url: string): Promise<MailboxPayload> {
+  const res = await fetch(url);
+  const json = (await res.json()) as MailboxPayload & { error?: string; detail?: string };
+  if (!res.ok) {
+    throw new Error(json.detail ?? json.error ?? 'Could not load mailbox');
+  }
+  if (typeof json.email !== 'string' || !json.email) {
+    throw new Error('Invalid mailbox response');
+  }
+  return { email: json.email, provider: json.provider };
+}
+
 const COLUMNS: { status: BandStatus; title: string; hint: string; dot: string }[] = [
   { status: 'incoming',        title: 'Incoming',        hint: 'fresh leads', dot: 'bg-accent' },
   { status: 'in_conversation', title: 'In Conversation', hint: 'back & forth', dot: 'bg-amber' },
@@ -17,11 +31,43 @@ const COLUMNS: { status: BandStatus; title: string; hint: string; dot: string }[
 export function KanbanBoard() {
   const [selectedBandId, setSelectedBandId] = useState<string | null>(null);
   const [deletingBandId, setDeletingBandId] = useState<string | null>(null);
+  const [movingBandId, setMovingBandId] = useState<string | null>(null);
   const { data, error, isLoading, mutate } = useSWR<{ bands: BandRow[] }>(
     '/api/bands',
     fetcher,
     { refreshInterval: 15000, revalidateOnFocus: true },
   );
+
+  const {
+    data: mailboxData,
+    error: mailboxError,
+    isLoading: mailboxLoading,
+  } = useSWR<MailboxPayload>(
+    '/api/mailbox',
+    mailboxFetcher,
+    { refreshInterval: 30000, revalidateOnFocus: true },
+  );
+
+  async function handleMoveBand(band: BandRow, newStatus: BandStatus) {
+    if (movingBandId || band.status === newStatus) return;
+    setMovingBandId(band.id);
+    try {
+      const res = await fetch(`/api/bands/${band.id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error ?? 'Failed to move band');
+      }
+      await mutate();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Failed to move band');
+    } finally {
+      setMovingBandId(null);
+    }
+  }
 
   async function handleDeleteBand(band: BandRow) {
     if (deletingBandId) return;
@@ -68,6 +114,16 @@ export function KanbanBoard() {
       <header className="px-10 pt-8 pb-6">
         <div className="flex items-end justify-between gap-6">
           <div>
+            <p className="mb-2 font-mono text-[11px] text-ink-4">
+              <span className="uppercase tracking-[0.14em]">Tracking </span>
+              {mailboxError ? (
+                <span className="italic text-ink-4">could not load mailbox</span>
+              ) : mailboxData?.email ? (
+                <span className="font-medium text-ink-2">{mailboxData.email}</span>
+              ) : (
+                <span className="text-ink-3">{mailboxLoading ? '…' : '—'}</span>
+              )}
+            </p>
             <div className="flex items-baseline gap-2">
               <h1 className="text-[28px] font-[600] tracking-[-0.015em] text-ink">
                 Lookout Booking
@@ -173,6 +229,8 @@ export function KanbanBoard() {
                     onClick={() => setSelectedBandId(b.id)}
                     onDelete={handleDeleteBand}
                     deleting={deletingBandId === b.id}
+                    onMove={handleMoveBand}
+                    moving={movingBandId === b.id}
                   />
                 </div>
               ))}

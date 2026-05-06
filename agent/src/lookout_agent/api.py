@@ -46,6 +46,11 @@ class DraftOut(BaseModel):
     updated_at: datetime
 
 
+class MailboxOut(BaseModel):
+    email: str
+    provider: str
+
+
 class BandInsightsOut(BaseModel):
     genre: str | None = None
     fee_range: str | None = None
@@ -80,6 +85,20 @@ def _latest_thread_for_band(s, band_id: UUID) -> EmailThread | None:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/mailbox", response_model=MailboxOut)
+def get_mailbox():
+    """Email address of the mailbox the OAuth token refers to (matches ingestion)."""
+    provider = get_provider()
+    try:
+        email = provider.mailbox_identity_email()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not resolve mailbox for provider {provider.provider_name}: {e!s}",
+        ) from e
+    return MailboxOut(email=email, provider=provider.provider_name)
 
 
 @app.get("/bands/{band_id}/thread", response_model=ThreadOut)
