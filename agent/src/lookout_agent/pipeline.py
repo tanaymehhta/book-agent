@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from .classifier import classify_inbound
@@ -417,6 +417,20 @@ def _run_reply_engine(
                 log.warning("Cannot reply: band %s has no primary_email", band_id)
                 return
 
+            last_inbound_msg_id = (
+                s.execute(
+                    select(Message.internet_message_id)
+                    .where(
+                        Message.thread_id == thread.id,
+                        Message.direction == MessageDirection.inbound,
+                        Message.internet_message_id.is_not(None),
+                    )
+                    .order_by(desc(Message.sent_at))
+                    .limit(1)
+                )
+                .scalar_one_or_none()
+            )
+
             if send_reply:
                 # First-contact auto-reply: send immediately.
                 try:
@@ -425,6 +439,7 @@ def _run_reply_engine(
                         subject=thread.subject or "",
                         body_text=decision.draft_text,
                         reply_to_thread_id=thread.provider_thread_id,
+                        in_reply_to_message_id=last_inbound_msg_id,
                     )
 
                     _insert_message(s, thread, sent, classification=None, auto_sent=False)
@@ -448,6 +463,7 @@ def _run_reply_engine(
                         reply_to_thread_id=thread.provider_thread_id,
                         to=[to_email],
                         subject=thread.subject or "",
+                        in_reply_to_message_id=last_inbound_msg_id,
                     )
 
                     s.add(

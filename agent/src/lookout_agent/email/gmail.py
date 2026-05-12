@@ -202,8 +202,15 @@ class GmailProvider(EmailProvider):
         body_text: str,
         reply_to_thread_id: str | None = None,
         cc: list[str] | None = None,
+        in_reply_to_message_id: str | None = None,
     ) -> NormalizedMessage:
-        raw = self._build_raw(to=to, subject=subject, body_text=body_text, cc=cc)
+        raw = self._build_raw(
+            to=to,
+            subject=_ensure_reply_subject(subject, in_reply_to_message_id),
+            body_text=body_text,
+            cc=cc,
+            in_reply_to_message_id=in_reply_to_message_id,
+        )
         body = {"raw": raw}
         if reply_to_thread_id:
             body["threadId"] = reply_to_thread_id
@@ -225,12 +232,17 @@ class GmailProvider(EmailProvider):
         to: list[str] | None = None,
         subject: str | None = None,
         cc: list[str] | None = None,
+        in_reply_to_message_id: str | None = None,
     ) -> DraftRef:
         # Drafts need at least one recipient in Gmail to be meaningful, but
         # technically a draft can be saved without To set. We always send at
         # least a plausible subject.
         raw = self._build_raw(
-            to=to or [], subject=subject or "", body_text=body_text, cc=cc
+            to=to or [],
+            subject=_ensure_reply_subject(subject or "", in_reply_to_message_id),
+            body_text=body_text,
+            cc=cc,
+            in_reply_to_message_id=in_reply_to_message_id,
         )
         message_body: dict = {"raw": raw}
         if reply_to_thread_id:
@@ -260,6 +272,8 @@ class GmailProvider(EmailProvider):
             cc=_parse_address_list(headers.get("Cc", "")) or None,
             subject=headers.get("Subject", ""),
             body_text=body_text,
+            in_reply_to_message_id=headers.get("In-Reply-To"),
+            references=headers.get("References"),
         )
         body: dict = {"message": {"raw": raw}}
         if msg.get("threadId"):
@@ -317,6 +331,8 @@ class GmailProvider(EmailProvider):
         subject: str,
         body_text: str,
         cc: list[str] | None = None,
+        in_reply_to_message_id: str | None = None,
+        references: str | None = None,
     ) -> str:
         msg = EmailMessage()
         msg["From"] = self.user_email
@@ -325,6 +341,15 @@ class GmailProvider(EmailProvider):
         if cc:
             msg["Cc"] = ", ".join(cc)
         msg["Subject"] = subject
+        if in_reply_to_message_id:
+            irt = _bracket_msg_id(in_reply_to_message_id)
+            msg["In-Reply-To"] = irt
+            if references:
+                msg["References"] = f"{references} {irt}".strip()
+            else:
+                msg["References"] = irt
+        elif references:
+            msg["References"] = references
         msg.set_content(body_text)
         return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
 
@@ -390,6 +415,26 @@ class GmailProvider(EmailProvider):
 
 
 # ---- Module-level parsing helpers -----------------------------------------
+
+def _bracket_msg_id(msg_id: str) -> str:
+    s = msg_id.strip()
+    if not s:
+        return s
+    if s.startswith("<") and s.endswith(">"):
+        return s
+    return f"<{s}>"
+
+
+def _ensure_reply_subject(subject: str, in_reply_to_message_id: str | None) -> str:
+    if not in_reply_to_message_id:
+        return subject
+    s = (subject or "").strip()
+    if not s:
+        return "Re:"
+    if s[:3].lower() == "re:":
+        return s
+    return f"Re: {s}"
+
 
 def _parse_address_list(raw: str) -> list[str]:
     if not raw:

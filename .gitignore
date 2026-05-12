@@ -16,3 +16,4 @@ build/
 *.log
 DEPLOY_PLAN.md
 client_secret*.json
+.claude/

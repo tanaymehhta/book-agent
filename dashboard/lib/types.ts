@@ -54,6 +54,24 @@ export interface BandInsights {
   updated_at: string | null;
 }
 
+export interface SocialLink {
+  label: string;
+  url: string;
+}
+
+export interface BandProfile {
+  id: string;
+  name: string | null;
+  contact_name: string | null;
+  primary_email: string | null;
+  w9_name: string | null;
+  bio: string | null;
+  social_links: SocialLink[];
+  on_roster: boolean;
+  status: string | null;
+  updated_at: string | null;
+}
+
 export interface DraftRow {
   id: string;
   provider: string;

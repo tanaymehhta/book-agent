@@ -92,6 +92,7 @@ class EmailProvider(ABC):
         body_text: str,
         reply_to_thread_id: str | None = None,
         cc: list[str] | None = None,
+        in_reply_to_message_id: str | None = None,
     ) -> NormalizedMessage:
         """Send a message. Returns the normalized sent message so the caller
         can persist it.
@@ -109,6 +110,7 @@ class EmailProvider(ABC):
         to: list[str] | None = None,
         subject: str | None = None,
         cc: list[str] | None = None,
+        in_reply_to_message_id: str | None = None,
     ) -> DraftRef:
         """Create a provider-side draft and return its ref."""
 

@@ -56,6 +56,9 @@ class Band(Base):
         _pg_enum(ConversationStage, "conversation_stage"), server_default="new_lead"
     )
     music_links: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    w9_name: Mapped[str | None] = mapped_column(Text)
+    bio: Mapped[str | None] = mapped_column(Text)
+    social_links: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     typical_fee_cents: Mapped[int | None] = mapped_column(Integer)
     draw_notes: Mapped[str | None] = mapped_column(Text)
     first_contact_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -66,6 +66,32 @@ class CreateDraftIn(BaseModel):
     body_text: str = Field(min_length=1)
 
 
+class SocialLink(BaseModel):
+    label: str
+    url: str
+
+
+class BandProfileOut(BaseModel):
+    id: str
+    name: str | None = None
+    contact_name: str | None = None
+    primary_email: str | None = None
+    w9_name: str | None = None
+    bio: str | None = None
+    social_links: list[SocialLink] = Field(default_factory=list)
+    on_roster: bool = False
+    status: str | None = None
+    updated_at: datetime | None = None
+
+
+class UpdateBandProfileIn(BaseModel):
+    name: str | None = None
+    contact_name: str | None = None
+    w9_name: str | None = None
+    bio: str | None = None
+    social_links: list[SocialLink] | None = None
+
+
 class UpdateDraftIn(BaseModel):
     body_text: str = Field(min_length=1)
 
@@ -198,11 +224,26 @@ def create_reply_draft(band_id: str, payload: CreateDraftIn):
         if not to_email:
             raise HTTPException(status_code=400, detail="Band has no primary_email")
 
+        last_inbound_msg_id = (
+            s.execute(
+                select(Message.internet_message_id)
+                .where(
+                    Message.thread_id == thread.id,
+                    Message.direction == MessageDirection.inbound,
+                    Message.internet_message_id.is_not(None),
+                )
+                .order_by(desc(Message.sent_at))
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+
         draft_ref = provider.create_draft(
             body_text=payload.body_text,
             reply_to_thread_id=thread.provider_thread_id,
             to=[to_email],
             subject=thread.subject or "",
+            in_reply_to_message_id=last_inbound_msg_id,
         )
 
         draft = Draft(
@@ -317,3 +358,67 @@ def send_draft(draft_id: str):
 
         return {"ok": True}
 
+
+
+def _serialize_band_profile(band: Band) -> BandProfileOut:
+    raw_links = band.social_links or []
+    parsed: list[SocialLink] = []
+    for item in raw_links:
+        if isinstance(item, dict) and item.get("url"):
+            parsed.append(SocialLink(label=str(item.get("label") or item["url"]), url=str(item["url"])))
+    return BandProfileOut(
+        id=str(band.id),
+        name=band.name,
+        contact_name=band.contact_name,
+        primary_email=band.primary_email,
+        w9_name=band.w9_name,
+        bio=band.bio,
+        social_links=parsed,
+        on_roster=band.on_roster,
+        status=band.status.value if band.status else None,
+        updated_at=band.updated_at,
+    )
+
+
+@app.get("/bands/{band_id}/profile", response_model=BandProfileOut)
+def get_band_profile(band_id: str):
+    try:
+        band_uuid = UUID(band_id)
+    except ValueError as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid band_id") from e
+
+    with session_scope() as s:
+        band = s.get(Band, band_uuid)
+        if band is None:
+            raise HTTPException(status_code=404, detail="Band not found")
+        return _serialize_band_profile(band)
+
+
+@app.patch("/bands/{band_id}/profile", response_model=BandProfileOut)
+def update_band_profile(band_id: str, payload: UpdateBandProfileIn):
+    try:
+        band_uuid = UUID(band_id)
+    except ValueError as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid band_id") from e
+
+    with session_scope() as s:
+        band = s.get(Band, band_uuid)
+        if band is None:
+            raise HTTPException(status_code=404, detail="Band not found")
+
+        data = payload.model_dump(exclude_unset=True)
+        if "name" in data:
+            band.name = data["name"]
+        if "contact_name" in data:
+            band.contact_name = data["contact_name"]
+        if "w9_name" in data:
+            band.w9_name = data["w9_name"]
+        if "bio" in data:
+            band.bio = data["bio"]
+        if "social_links" in data and data["social_links"] is not None:
+            band.social_links = [
+                {"label": link.label, "url": link.url} for link in payload.social_links or []
+            ]
+        band.updated_at = datetime.now(timezone.utc)
+        s.flush()
+        return _serialize_band_profile(band)

@@ -191,6 +191,9 @@ export function KanbanBoard() {
           bandId={selectedBandId}
           onClose={() => setSelectedBandId(null)}
           onSent={() => mutate()}
+          showProfile={
+            bands.find((b) => b.id === selectedBandId)?.status === 'approved'
+          }
         />
       )}
 
