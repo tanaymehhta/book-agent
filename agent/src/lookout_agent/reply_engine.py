@@ -40,6 +40,42 @@ class ReplyDecision:
     stage_update: ConversationStage | None = None
 
 
+FIRST_REPLY_TEMPLATE = """\
+Hi {greeting},
+
+Thanks so much for reaching out about playing the Taproom at Lookout Farm! \
+To help us see if it's a fit, could you share a few things:
+
+  • Your fee for a 2- or 3-hour set
+  • Your genre or musical style
+  • A link or two to your music (SoundCloud, Spotify, YouTube, Bandcamp — whatever you've got)
+  • The months or dates you're available
+  • A sense of your local draw — friends and fans who'd come out
+
+A couple of quick notes on our setup: shows are in the Taproom, sets run \
+2 or 3 hours starting around 6pm, and bands bring their own PA, mics, and \
+cables. We keep the volume in check (electronic drums preferred).
+
+Looking forward to hearing more!
+
+Laura Neville
+Marketing Director
+Belkin Family Lookout Farm
+"""
+
+
+def render_first_reply(band: "Band") -> str:
+    """Deterministic first-reply text. No LLM call.
+
+    Only variable is the greeting name; everything else is fixed venue copy.
+    Prefer contact_name (the person who emailed) over band.name (the act).
+    """
+    candidate = (band.contact_name or band.name or "").strip()
+    first_token = candidate.split()[0] if candidate else ""
+    greeting = first_token if first_token and "@" not in first_token else "there"
+    return FIRST_REPLY_TEMPLATE.format(greeting=greeting)
+
+
 SYSTEM_PROMPT = """\
 You are a booking assistant for Lookout Farm Brewing & Cider Co., a taproom venue.
 Your job is to help book live music acts. You are friendly, professional, and concise.
@@ -56,10 +92,6 @@ Your goals in each reply:
 2. Ask for any missing info you need (availability, set length preference, fee expectations, genre/style)
 3. Move the conversation toward confirmation
 4. Be warm but efficient — don't over-explain things already discussed
-
-If this is the very first reply to a new inquiry (no prior back-and-forth),
-thank them for reaching out and ask for: their set fee, available dates or
-months, and a sense of local draw (friends/fans who'd come to the show).
 
 Never invent dates/fees that haven't been discussed. If something is unclear, ask.
 If the band seems confirmed and ready, say so clearly.
@@ -157,7 +189,7 @@ def decide_next_action(
 
         # Step 1: Detect stage and approval signal
         stage_response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=200,
             messages=[
                 {
@@ -185,7 +217,7 @@ def decide_next_action(
 
         # Step 2: Generate reply draft
         reply_response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             system=SYSTEM_PROMPT,
             messages=[

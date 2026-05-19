@@ -30,6 +30,12 @@ class BandInsights:
     website: str | None = None
     social_links: list[str] = field(default_factory=list)
     key_facts: list[str] = field(default_factory=list)
+    # Profile fields auto-extracted for the roster Profile tab.
+    # These backfill `bands.name`, `bands.contact_name`, `bands.w9_name`
+    # only when those fields are currently empty (never overwrite human edits).
+    band_name: str | None = None
+    contact_name: str | None = None
+    w9_name: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,6 +52,9 @@ class BandInsights:
             website=data.get("website"),
             social_links=list(data.get("social_links") or []),
             key_facts=list(data.get("key_facts") or []),
+            band_name=data.get("band_name"),
+            contact_name=data.get("contact_name"),
+            w9_name=data.get("w9_name"),
         )
 
 
@@ -61,8 +70,15 @@ Respond as a single JSON object with exactly these keys:
   "availability_notes": "<dates or months mentioned as available, or null>",
   "website": "<band website URL, or null>",
   "social_links": ["<social URLs: instagram/spotify/bandcamp/facebook>"],
-  "key_facts": ["<2-3 short bullet points of anything else notable>"]
+  "key_facts": ["<2-3 short bullet points of anything else notable>"],
+  "band_name": "<the band/act/stage name, e.g. 'The Cool Band', or null>",
+  "contact_name": "<the person we're emailing with — first name or full name, or null>",
+  "w9_name": "<the legal payee name for W-9 forms, often an LLC or person, or null>"
 }
+
+Only extract what is explicitly stated in the email. Do not infer the W-9
+name from the band name or the contact's name — only fill it when the sender
+specifically calls it out (e.g. 'my W-9 name is ...', 'make checks payable to ...').
 
 Return only the JSON object — no preamble, no markdown fencing.
 """
@@ -85,7 +101,7 @@ def extract_insights(s: Session, thread: EmailThread) -> BandInsights:
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=600,
             messages=[
                 {
@@ -137,4 +153,52 @@ def get_or_refresh_insights(s: Session, band: Band, thread: EmailThread | None) 
     insights = extract_insights(s, thread)
     band.insights = insights.to_dict()
     band.insights_updated_at = last_activity  # tie cache validity to latest message time
+    backfill_band_profile(band, insights)
     return insights
+
+
+def _looks_like_email_local_part(value: str | None, email: str | None) -> bool:
+    """True if a name field looks like it was auto-derived from an email
+    address (e.g. 'jamie.doe' from 'jamie.doe@example.com')."""
+    if not value or not email:
+        return False
+    local = email.split("@", 1)[0].lower()
+    v = value.strip().lower()
+    return v == local or v.replace(" ", ".") == local
+
+
+def backfill_band_profile(band: Band, insights: BandInsights) -> None:
+    """Fill empty profile fields from extracted insights.
+
+    Rules:
+    - Never overwrite a value Laura has manually set.
+    - `band.name` is auto-seeded at band creation from the sender's display
+      name (or email local part). If it still looks like the raw email local
+      part, we treat it as "not really named yet" and accept the LLM's
+      band_name. Otherwise we leave it alone.
+    - `contact_name` and `w9_name` only fill when currently null/empty.
+    """
+    changed = False
+
+    if insights.band_name and (
+        not band.name
+        or not band.name.strip()
+        or _looks_like_email_local_part(band.name, band.primary_email)
+    ):
+        if band.name != insights.band_name:
+            band.name = insights.band_name
+            changed = True
+
+    if insights.contact_name and (not band.contact_name or not band.contact_name.strip()):
+        band.contact_name = insights.contact_name
+        changed = True
+
+    if insights.w9_name and (not band.w9_name or not band.w9_name.strip()):
+        band.w9_name = insights.w9_name
+        changed = True
+
+    if changed:
+        log.info(
+            "PROFILE_BACKFILL band=%s name=%r contact=%r w9=%r",
+            band.id, band.name, band.contact_name, band.w9_name,
+        )

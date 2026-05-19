@@ -22,6 +22,7 @@ interface BandCardProps {
   deleting?: boolean;
   onMove?: (band: BandRow, newStatus: BandStatus) => void;
   moving?: boolean;
+  incompleteProfile?: boolean;
 }
 
 export function BandCard({
@@ -31,6 +32,7 @@ export function BandCard({
   deleting = false,
   onMove,
   moving = false,
+  incompleteProfile = false,
 }: BandCardProps) {
   if (band.status === 'approved') {
     return (
@@ -41,6 +43,7 @@ export function BandCard({
         deleting={deleting}
         onMove={onMove}
         moving={moving}
+        incompleteProfile={incompleteProfile}
       />
     );
   }
@@ -63,13 +66,6 @@ const NEXT_STATUS: Record<BandStatus, BandStatus | null> = {
   archived: null,
 };
 
-const PREV_STATUS: Record<BandStatus, BandStatus | null> = {
-  incoming: null,
-  in_conversation: 'incoming',
-  approved: 'in_conversation',
-  archived: null,
-};
-
 const STATUS_SHORT_LABELS: Record<BandStatus, string> = {
   incoming: 'incoming',
   in_conversation: 'in conv.',
@@ -77,53 +73,88 @@ const STATUS_SHORT_LABELS: Record<BandStatus, string> = {
   archived: 'archived',
 };
 
-function MoveControls({
+function CardActions({
   band,
   onMove,
   moving,
-  variant,
+  onDelete,
+  deleting,
 }: {
   band: BandRow;
   onMove?: (band: BandRow, newStatus: BandStatus) => void;
   moving?: boolean;
-  variant: 'inline' | 'overlay';
+  onDelete?: (band: BandRow) => void;
+  deleting?: boolean;
 }) {
-  if (!onMove) return null;
   const next = NEXT_STATUS[band.status];
-  const prev = PREV_STATUS[band.status];
-  if (!next && !prev) return null;
-
-  const baseBtn =
-    variant === 'overlay'
-      ? 'rounded-full border border-line-strong bg-paper px-2 py-0.5 text-[10px] font-[500] text-ink-3 transition hover:border-ink/30 hover:text-ink-2 disabled:opacity-50'
-      : 'text-[11px] font-[500] text-ink-3 transition hover:text-ink-2 disabled:opacity-50';
+  const hasMove = !!onMove && !!next;
+  const hasDelete = !!onDelete;
+  if (!hasMove && !hasDelete) return null;
 
   return (
-    <div className={variant === 'overlay' ? 'flex items-center gap-1.5' : 'flex items-center gap-2'}>
-      {prev && (
+    <div
+      className="absolute right-2 top-2 z-10 flex items-center gap-0.5"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {hasMove && (
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onMove(band, prev);
+            onMove!(band, next!);
           }}
           disabled={moving}
-          className={baseBtn}
-          title={`Move back to ${STATUS_SHORT_LABELS[prev]}`}
+          aria-label={`Move to ${STATUS_SHORT_LABELS[next!]}`}
+          title={`Move to ${STATUS_SHORT_LABELS[next!]}`}
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full text-ink-4 transition hover:bg-paper hover:text-ink-2 disabled:opacity-50"
         >
-          {moving ? '…' : `← ${STATUS_SHORT_LABELS[prev]}`}
+          {moving ? (
+            <span className="text-[11px]">…</span>
+          ) : (
+            <svg
+              className="h-3.5 w-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 8h10" />
+              <path d="M9 4l4 4-4 4" />
+            </svg>
+          )}
         </button>
       )}
-      {next && (
+      {hasDelete && (
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onMove(band, next);
+            onDelete!(band);
           }}
-          disabled={moving}
-          className={baseBtn}
-          title={`Move forward to ${STATUS_SHORT_LABELS[next]}`}
+          disabled={deleting}
+          aria-label="Delete card"
+          title="Delete card"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full text-ink-4 transition hover:bg-accent-soft/60 hover:text-accent disabled:opacity-50"
         >
-          {moving ? '…' : `${STATUS_SHORT_LABELS[next]} →`}
+          {deleting ? (
+            <span className="text-[11px]">…</span>
+          ) : (
+            <svg
+              className="h-3.5 w-3.5"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M2.5 4h11" />
+              <path d="M6 4V2.5h4V4" />
+              <path d="M4 4l.7 9a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4" />
+              <path d="M6.5 7v4" />
+              <path d="M9.5 7v4" />
+            </svg>
+          )}
         </button>
       )}
     </div>
@@ -137,6 +168,7 @@ function ApprovedCard({
   deleting,
   onMove,
   moving,
+  incompleteProfile = false,
 }: {
   band: BandRow;
   onClick?: () => void;
@@ -144,42 +176,54 @@ function ApprovedCard({
   deleting?: boolean;
   onMove?: (band: BandRow, newStatus: BandStatus) => void;
   moving?: boolean;
+  incompleteProfile?: boolean;
 }) {
   return (
     <div
       onClick={onClick}
-      className={`group relative rounded-xl border border-line-strong bg-paper-2 px-3.5 py-3 shadow-card transition hover:border-ink/25 hover:bg-paper-deep hover:shadow-card-hover ${onClick ? 'cursor-pointer' : ''}`}
+      className={`group relative rounded-xl border bg-paper-2 px-3.5 py-3 shadow-card transition hover:bg-paper-deep hover:shadow-card-hover ${onClick ? 'cursor-pointer' : ''} ${
+        incompleteProfile
+          ? 'border-amber/60 bg-amber-soft/20 hover:border-amber'
+          : 'border-line-strong hover:border-ink/25'
+      }`}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-[600] text-ink">
-            {band.name ?? <span className="font-display italic text-ink-3">unknown</span>}
+            {band.name && band.name.trim() ? (
+              band.name
+            ) : (
+              <span className="font-display italic text-ink-3">unnamed band</span>
+            )}
           </div>
           <div className="mt-0.5 truncate text-[12px] text-ink-3">
             {band.contact_name ? `${band.contact_name} · ` : ''}
             {band.primary_email}
           </div>
+          {incompleteProfile && (
+            <div className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-amber-soft/70 px-2 py-0.5 text-[10px] font-[600] text-amber">
+              <span className="h-1 w-1 rounded-full bg-amber" />
+              incomplete profile — add a band name
+            </div>
+          )}
         </div>
-        <span className="shrink-0 inline-flex items-center gap-1 rounded-full bg-moss-soft/60 px-2 py-0.5 text-[10px] font-[600] text-moss">
-          <span className="h-1 w-1 rounded-full bg-moss" />
-          roster
-        </span>
+        <div className="shrink-0 flex flex-col items-end gap-1 mr-14">
+          <span className="inline-flex items-center gap-1 rounded-full bg-moss-soft/60 px-2 py-0.5 text-[10px] font-[600] text-moss">
+            <span className="h-1 w-1 rounded-full bg-moss" />
+            roster
+          </span>
+          {band.last_direction === 'inbound' && (
+            <StatusPill tone="accent" label="needs reply" />
+          )}
+        </div>
       </div>
-      <div className="absolute right-2 top-2 flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
-        <MoveControls band={band} onMove={onMove} moving={moving} variant="overlay" />
-        {onDelete && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(band);
-            }}
-            disabled={deleting}
-            className="text-[10px] font-[500] text-ink-4 transition hover:text-accent disabled:opacity-50"
-          >
-            {deleting ? '…' : 'remove'}
-          </button>
-        )}
-      </div>
+      <CardActions
+        band={band}
+        onMove={onMove}
+        moving={moving}
+        onDelete={onDelete}
+        deleting={deleting}
+      />
     </div>
   );
 }
@@ -212,12 +256,19 @@ function FullCard({
     <div
       className={`group relative rounded-xl border border-line-strong bg-paper-2 shadow-card transition hover:border-ink/25 hover:shadow-card-hover ${stale ? 'opacity-55' : ''}`}
     >
+      <CardActions
+        band={band}
+        onMove={onMove}
+        moving={moving}
+        onDelete={onDelete}
+        deleting={deleting}
+      />
       <div
         onClick={onClick}
         className={`px-3.5 pt-3 pb-2.5 ${onClick ? 'cursor-pointer' : ''}`}
       >
         <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 pr-14">
             <div className="truncate text-[15px] font-[600] tracking-[-0.005em] text-ink">
               {band.name ?? <span className="font-display italic text-ink-3">unknown</span>}
             </div>
@@ -229,7 +280,10 @@ function FullCard({
             </div>
           </div>
 
-          <div className="flex shrink-0 flex-col items-end gap-1">
+          <div className="flex shrink-0 flex-col items-end gap-1 mt-7">
+            {band.last_direction === 'inbound' && (
+              <StatusPill tone="accent" label="needs reply" />
+            )}
             {band.needs_review && <StatusPill tone="accent" label="review" />}
             {band.draft_ready && <StatusPill tone="amber" label="draft" />}
             {awaitingReply && !band.draft_ready && (
@@ -239,14 +293,9 @@ function FullCard({
         </div>
 
         {band.last_snippet && (
-          <div className="mt-2.5">
-            <p className="line-clamp-2 font-display text-[14px] italic leading-snug text-ink-2">
-              <span className="mr-1 not-italic font-sans text-[10px] font-[600] uppercase tracking-[0.14em] text-ink-4">
-                {band.last_direction === 'outbound' ? 'you' : 'them'}
-              </span>
-              &ldquo;{band.last_snippet}&rdquo;
-            </p>
-          </div>
+          <p className="mt-2 truncate text-[11.5px] leading-snug text-ink-3">
+            {decodeSnippet(band.last_snippet)}
+          </p>
         )}
       </div>
 
@@ -261,7 +310,6 @@ function FullCard({
               {STAGE_LABELS[band.conversation_stage] ?? band.conversation_stage}
             </span>
           )}
-          <MoveControls band={band} onMove={onMove} moving={moving} variant="inline" />
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -271,18 +319,6 @@ function FullCard({
           >
             {expanded ? 'less' : 'more'}
           </button>
-          {onDelete && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(band);
-              }}
-              disabled={deleting}
-              className="text-[11px] text-ink-4 transition hover:text-accent disabled:opacity-50"
-            >
-              {deleting ? '…' : 'remove'}
-            </button>
-          )}
         </div>
       </div>
 
@@ -409,6 +445,20 @@ function InsightsPanel({ insights }: { insights?: BandInsights }) {
       )}
     </div>
   );
+}
+
+function decodeSnippet(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function hostnameOf(url: string): string | null {

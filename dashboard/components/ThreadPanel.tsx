@@ -10,6 +10,43 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 const UNDO_WINDOW_MS = 30_000;
 
+// Split a raw email body into the "fresh" part Laura wrote/Gmail-quoted
+// history. Stops at the first attribution line ("On ... wrote:") or the
+// first `>`-prefixed line, whichever comes first.
+function splitBody(text: string | null | undefined): {
+  fresh: string;
+  quoted: string | null;
+} {
+  if (!text) return { fresh: '', quoted: null };
+  const lines = text.split('\n');
+  let splitIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (/^On .+ wrote:\s*$/.test(trimmed)) {
+      splitIdx = i;
+      break;
+    }
+    if (trimmed.startsWith('>')) {
+      splitIdx = i;
+      break;
+    }
+  }
+  if (splitIdx === -1) return { fresh: text.trimEnd(), quoted: null };
+  let freshEnd = splitIdx;
+  while (freshEnd > 0 && lines[freshEnd - 1].trim() === '') freshEnd--;
+  const fresh = lines.slice(0, freshEnd).join('\n').trimEnd();
+  const quotedRaw = lines.slice(splitIdx).join('\n').trim();
+  return { fresh, quoted: quotedRaw || null };
+}
+
+function stripQuoteMarkers(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/^(\s*>+\s?)+/, ''))
+    .join('\n')
+    .trim();
+}
+
 interface ThreadPanelProps {
   bandId: string;
   onClose: () => void;
@@ -38,9 +75,30 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
   const [pending, setPending] = useState<PendingSend | null>(null);
   const [pendingSeconds, setPendingSeconds] = useState(UNDO_WINDOW_MS / 1000);
   const [view, setView] = useState<PanelView>('thread');
+  const [usingAiDraft, setUsingAiDraft] = useState(false);
+  const prefilledDraftIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const messages = data?.messages ?? [];
+  const pendingDraft = data?.pending_draft ?? null;
+  const aiDraft =
+    pendingDraft && pendingDraft.created_by === 'agent' ? pendingDraft : null;
+
+  useEffect(() => {
+    if (!aiDraft) {
+      if (prefilledDraftIdRef.current && usingAiDraft) {
+        setUsingAiDraft(false);
+        prefilledDraftIdRef.current = null;
+      }
+      return;
+    }
+    if (prefilledDraftIdRef.current === aiDraft.id) return;
+    if (compose.trim() !== '' || pending) return;
+    setCompose(aiDraft.body_text);
+    setUsingAiDraft(true);
+    prefilledDraftIdRef.current = aiDraft.id;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiDraft?.id]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -70,18 +128,35 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
     setSendError(null);
 
     try {
-      const res = await fetch(`/api/bands/${bandId}/drafts`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ body_text }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json?.id) throw new Error(json?.error || 'Failed to create draft');
+      let draftId: string;
+      if (aiDraft) {
+        // Re-use the AI's existing Gmail draft. PATCH updates the body in
+        // place (whether Laura edited it or not), then we'll POST /send
+        // after the undo window. No orphan draft, no second Gmail draft.
+        const res = await fetch(`/api/drafts/${aiDraft.id}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ body_text }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json?.id) throw new Error(json?.error || 'Failed to update draft');
+        draftId = json.id as string;
+      } else {
+        const res = await fetch(`/api/bands/${bandId}/drafts`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ body_text }),
+        });
+        const json = await res.json();
+        if (!res.ok || !json?.id) throw new Error(json?.error || 'Failed to create draft');
+        draftId = json.id as string;
+      }
 
-      const draftId = json.id as string;
       const timer = setTimeout(() => fireSend(draftId), UNDO_WINDOW_MS);
       setPending({ draftId, body: body_text, timer });
       setCompose('');
+      setUsingAiDraft(false);
+      prefilledDraftIdRef.current = null;
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'Failed to send');
     } finally {
@@ -100,6 +175,13 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
       setSendError(err instanceof Error ? err.message : 'Send failed');
       setPending(null);
     }
+  }
+
+  async function handleSendNow() {
+    if (!pending) return;
+    const { draftId, timer } = pending;
+    clearTimeout(timer);
+    await fireSend(draftId);
   }
 
   function handleUndo() {
@@ -185,35 +267,6 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
           ))}
         </div>
 
-        {/* ── UNDO BANNER ─────────────────────────────────────── */}
-        {pending && (
-          <div className="relative border-t border-line-strong bg-amber-soft/40 px-6 py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-[12px] text-ink-2">
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent pulse-soft" />
-                <span>
-                  sending in{' '}
-                  <span className="font-[600] tabular-nums text-accent">
-                    {pendingSeconds}s
-                  </span>
-                </span>
-              </div>
-              <button
-                onClick={handleUndo}
-                className="rounded-full border border-ink/20 bg-paper px-3 py-1 text-[12px] font-[500] text-ink-2 transition hover:border-ink/35 hover:bg-paper-deep"
-              >
-                Undo
-              </button>
-            </div>
-            <div className="absolute inset-x-0 bottom-0 h-px bg-line-strong">
-              <div
-                className="h-full bg-accent transition-[width] duration-1000 ease-linear"
-                style={{ width: `${(pendingSeconds / (UNDO_WINDOW_MS / 1000)) * 100}%` }}
-              />
-            </div>
-          </div>
-        )}
-
         {/* ── COMPOSE ─────────────────────────────────────────── */}
         <div className="border-t border-line-strong bg-paper-2/70 px-6 py-4">
           <div className="mb-2 flex items-center justify-between">
@@ -224,6 +277,14 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
               — signed, Laura
             </span>
           </div>
+          {usingAiDraft && (
+            <div className="mb-2 inline-flex items-center gap-1.5 rounded-full bg-amber-soft/70 px-2.5 py-1 text-[11px] font-[500] text-amber">
+              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 1.5L7 4.5 10 5.5 7 6.5 6 9.5 5 6.5 2 5.5 5 4.5z" />
+              </svg>
+              AI suggestion — edit before sending
+            </div>
+          )}
           {sendError && (
             <div className="mb-2 rounded-md border-l-2 border-accent bg-accent-soft/40 px-2 py-1 text-[12px] text-accent-deep">
               {sendError}
@@ -231,7 +292,10 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
           )}
           <textarea
             value={compose}
-            onChange={(e) => setCompose(e.target.value)}
+            onChange={(e) => {
+              setCompose(e.target.value);
+              if (usingAiDraft) setUsingAiDraft(false);
+            }}
             placeholder="write a reply…"
             rows={5}
             disabled={sending || !!pending}
@@ -239,18 +303,49 @@ export function ThreadPanel({ bandId, onClose, onSent, showProfile = false }: Th
           />
           <div className="mt-3 flex items-center justify-between">
             <span className="text-[11px] text-ink-4">
-              {wordCount === 0 ? 'blank page' : `${wordCount} word${wordCount === 1 ? '' : 's'}`}
+              {pending ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent pulse-soft" />
+                  sending in{' '}
+                  <span className="font-[600] tabular-nums text-accent">
+                    {pendingSeconds}s
+                  </span>
+                  <span className="text-ink-4/60">·</span>
+                  <button
+                    onClick={handleUndo}
+                    className="text-ink-3 underline decoration-line-strong underline-offset-2 transition hover:text-ink-2 hover:decoration-ink/40"
+                  >
+                    undo
+                  </button>
+                </span>
+              ) : wordCount === 0 ? (
+                'blank page'
+              ) : (
+                `${wordCount} word${wordCount === 1 ? '' : 's'}`
+              )}
             </span>
-            <button
-              onClick={handleSend}
-              disabled={sending || !compose.trim() || !!pending}
-              className="inline-flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-[500] text-paper transition hover:bg-accent disabled:cursor-not-allowed disabled:bg-ink-4"
-            >
-              {sending ? 'sending…' : 'Send reply'}
-              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M2 6h8M7 3l3 3-3 3" />
-              </svg>
-            </button>
+            {pending ? (
+              <button
+                onClick={handleSendNow}
+                className="inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[13px] font-[500] text-paper transition hover:bg-accent-deep"
+              >
+                Send now
+                <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2 6h8M7 3l3 3-3 3" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={sending || !compose.trim()}
+                className="inline-flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-[500] text-paper transition hover:bg-accent disabled:cursor-not-allowed disabled:bg-ink-4"
+              >
+                {sending ? 'sending…' : 'Send reply'}
+                <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2 6h8M7 3l3 3-3 3" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
         </>
@@ -325,6 +420,9 @@ function TabButton({
 
 function MessageBubble({ message }: { message: ThreadMessageRow }) {
   const isOutbound = message.direction === 'outbound';
+  const [showQuoted, setShowQuoted] = useState(false);
+  const { fresh, quoted } = splitBody(message.body_text);
+  const displayFresh = fresh || message.snippet || '';
   return (
     <div className={`flex ${isOutbound ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[86%] ${isOutbound ? 'items-end' : 'items-start'}`}>
@@ -346,8 +444,46 @@ function MessageBubble({ message }: { message: ThreadMessageRow }) {
               : 'bg-paper-2 border border-line text-ink-2 rounded-tl-md'
           }`}
         >
-          {message.body_text || message.snippet || (
+          {displayFresh ? (
+            displayFresh
+          ) : !quoted ? (
             <span className="font-display italic opacity-60">(no body)</span>
+          ) : null}
+          {quoted && (
+            <div className={`${displayFresh ? 'mt-2.5 pt-2.5 border-t' : ''} ${
+              isOutbound ? 'border-paper/20' : 'border-line'
+            }`}>
+              <button
+                onClick={() => setShowQuoted((v) => !v)}
+                className={`inline-flex items-center gap-1 text-[11px] font-[500] transition ${
+                  isOutbound
+                    ? 'text-paper/60 hover:text-paper/90'
+                    : 'text-ink-4 hover:text-ink-3'
+                }`}
+              >
+                <svg
+                  className={`h-3 w-3 transition-transform ${showQuoted ? 'rotate-90' : ''}`}
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M4 2l4 4-4 4" />
+                </svg>
+                {showQuoted ? 'hide earlier' : 'earlier in this thread'}
+              </button>
+              {showQuoted && (
+                <div
+                  className={`mt-2 border-l-2 pl-3 text-[13px] leading-relaxed whitespace-pre-wrap opacity-70 ${
+                    isOutbound ? 'border-paper/30' : 'border-line-strong'
+                  }`}
+                >
+                  {stripQuoteMarkers(quoted)}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

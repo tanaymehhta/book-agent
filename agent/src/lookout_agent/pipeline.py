@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from .classifier import classify_inbound
 from .config import get_settings
 from .db import session_scope
+from .events import emit_event
+from .summarizer import summarize_message
 from .db.enums import BandStatus, Classification, ConversationStage, MessageDirection
 from .db.models import (
     Band,
@@ -66,6 +68,13 @@ def ingest_message(msg: NormalizedMessage, provider: EmailProvider) -> None:
             if result.classification == Classification.other:
                 _log_ignored(s, msg, result.classification, provider.provider_name)
                 log.info("Ignoring non-band inbound from %s (subj=%r)", sender, msg.subject)
+                emit_event(
+                    "classified_other",
+                    band_name=msg.from_address.name or sender,
+                    sender=sender,
+                    subject=msg.subject,
+                    reason=getattr(result, "reason", "") or "",
+                )
                 return
 
             band = _create_band_from_message(s, msg)
@@ -75,6 +84,13 @@ def ingest_message(msg: NormalizedMessage, provider: EmailProvider) -> None:
             classification = result.classification
             confidence = result.confidence
             log.info("New band created: %s <%s> (conf=%.2f)", band.name, sender, confidence)
+            emit_event(
+                "band_created",
+                band_id=band.id,
+                band_name=band.name,
+                sender=sender,
+                confidence=confidence,
+            )
         else:
             on_roster = bool(band.on_roster)
             result = classify_inbound(msg, known_sender=True, sender_on_roster=on_roster)
@@ -147,12 +163,14 @@ def ingest_message(msg: NormalizedMessage, provider: EmailProvider) -> None:
         thread_id = thread.id
 
     # Commit happens; now do side-effects outside the transaction
-    if engine_mode is not None:
+    if engine_mode == "send":
+        _send_first_reply(band_id=band_id, thread_id=thread_id, provider=provider)
+    elif engine_mode == "detect_only":
         _run_reply_engine(
             band_id=band_id,
             thread_id=thread_id,
             provider=provider,
-            send_reply=(engine_mode == "send"),
+            send_reply=False,
         )
 
 
@@ -256,6 +274,12 @@ def _insert_message(
     classification: Classification | None,
     auto_sent: bool,
 ) -> Message:
+    summary = summarize_message(
+        subject=msg.subject,
+        sender=msg.from_address.email,
+        direction=msg.direction,
+        body_text=msg.body_text or msg.snippet,
+    )
     m = Message(
         thread_id=thread.id,
         provider_message_id=msg.provider_message_id,
@@ -269,6 +293,7 @@ def _insert_message(
         body_text=msg.body_text,
         body_html=msg.body_html,
         snippet=msg.snippet,
+        summary=summary,
         sent_at=msg.sent_at,
         headers=msg.headers,
         classification=classification,
@@ -341,16 +366,80 @@ def _handle_outbound(s: Session, msg: NormalizedMessage, provider_name: str) -> 
     )
 
 
+def _send_first_reply(band_id, thread_id, provider: EmailProvider) -> None:
+    """First-contact auto-reply: send a deterministic templated reply.
+
+    No LLM call — the first reply is fixed venue copy with the band's name
+    spliced in. Sent immediately, persisted, marked as the one-and-only
+    auto-send for the band.
+    """
+    from .reply_engine import render_first_reply
+
+    with session_scope() as s:
+        band = s.get(Band, band_id)
+        thread = s.get(EmailThread, thread_id)
+        if band is None or thread is None:
+            return
+
+        to_email = (band.primary_email or "").strip()
+        if not to_email:
+            log.warning("Cannot send first reply: band %s has no primary_email", band_id)
+            return
+
+        last_inbound_msg_id = (
+            s.execute(
+                select(Message.internet_message_id)
+                .where(
+                    Message.thread_id == thread.id,
+                    Message.direction == MessageDirection.inbound,
+                    Message.internet_message_id.is_not(None),
+                )
+                .order_by(desc(Message.sent_at))
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+
+        body = render_first_reply(band)
+        try:
+            sent = provider.send_message(
+                to=[to_email],
+                subject=thread.subject or "",
+                body_text=body,
+                reply_to_thread_id=thread.provider_thread_id,
+                in_reply_to_message_id=last_inbound_msg_id,
+            )
+            _insert_message(s, thread, sent, classification=None, auto_sent=True)
+            thread.last_message_at = sent.sent_at
+            band.last_activity_at = sent.sent_at
+            band.draft_ready = False
+
+            transition_log.info(
+                "AUTO_SENT_FIRST_REPLY (template) | band=%s msg=%s thread=%s",
+                band_id,
+                sent.provider_message_id,
+                sent.provider_thread_id,
+            )
+            emit_event(
+                "auto_replied",
+                band_id=band.id,
+                band_name=band.name,
+                to=to_email,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to send first reply for band=%s", band_id)
+
+
 def _run_reply_engine(
     band_id, thread_id, provider: EmailProvider, *, send_reply: bool
 ) -> None:
-    """Run the reply engine for an active conversation.
+    """Run the reply engine for a follow-up inbound on an active conversation.
 
-    When send_reply=True (first inbound on a new inquiry only), a generated
-    reply is sent immediately. When send_reply=False (every later inbound), a
-    generated reply is saved as a pending Gmail draft for Laura to review,
-    edit, and send from the dashboard. Stage/approval updates always apply.
+    Generates a draft saved as a pending Gmail draft for Laura to review,
+    edit, and send from the dashboard. Stage/approval updates apply.
+    Never auto-sends. (First-contact auto-send goes through _send_first_reply.)
     """
+    from sqlalchemy import update
     from .db.enums import DraftCreatedBy, DraftStatus
     from .db.models import Draft
     from .reply_engine import NextAction, decide_next_action
@@ -431,63 +520,64 @@ def _run_reply_engine(
                 .scalar_one_or_none()
             )
 
-            if send_reply:
-                # First-contact auto-reply: send immediately.
-                try:
-                    sent = provider.send_message(
-                        to=[to_email],
-                        subject=thread.subject or "",
+            # Follow-up: save as a dashboard-only draft. We deliberately do
+            # NOT create a Gmail draft here — long threads would otherwise
+            # clog the Drafts folder. The draft lives only in our DB and
+            # surfaces in the dashboard compose box.
+            from uuid import uuid4
+
+            try:
+                # Supersede any earlier pending drafts on this thread so the
+                # dashboard never shows a stale suggestion responding to an
+                # older message.
+                s.execute(
+                    update(Draft)
+                    .where(
+                        Draft.thread_id == thread.id,
+                        Draft.status == DraftStatus.pending,
+                    )
+                    .values(
+                        status=DraftStatus.discarded,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                s.add(
+                    Draft(
+                        band_id=band.id,
+                        thread_id=thread.id,
+                        provider=provider.provider_name,
+                        provider_draft_id=f"local:{uuid4()}",
                         body_text=decision.draft_text,
-                        reply_to_thread_id=thread.provider_thread_id,
-                        in_reply_to_message_id=last_inbound_msg_id,
+                        status=DraftStatus.pending,
+                        created_by=DraftCreatedBy.agent,
                     )
+                )
+                band.draft_ready = True
 
-                    _insert_message(s, thread, sent, classification=None, auto_sent=False)
-                    thread.last_message_at = sent.sent_at
-                    band.last_activity_at = sent.sent_at
-                    band.draft_ready = False
-
-                    transition_log.info(
-                        "AUTO_SENT_REPLY | band=%s msg=%s thread=%s",
-                        band_id,
-                        sent.provider_message_id,
-                        sent.provider_thread_id,
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("Failed to auto-send agent reply for band=%s", band_id)
-            else:
-                # Follow-up: save as a pending Gmail draft for Laura to review.
-                try:
-                    draft_ref = provider.create_draft(
-                        body_text=decision.draft_text,
-                        reply_to_thread_id=thread.provider_thread_id,
-                        to=[to_email],
-                        subject=thread.subject or "",
-                        in_reply_to_message_id=last_inbound_msg_id,
-                    )
-
-                    s.add(
-                        Draft(
-                            band_id=band.id,
-                            thread_id=thread.id,
-                            provider=provider.provider_name,
-                            provider_draft_id=draft_ref.provider_draft_id,
-                            body_text=decision.draft_text,
-                            status=DraftStatus.pending,
-                            created_by=DraftCreatedBy.agent,
-                        )
-                    )
-                    band.draft_ready = True
-
-                    transition_log.info(
-                        "AGENT_DRAFT_CREATED | band=%s thread=%s provider_draft=%s",
-                        band_id,
-                        thread.provider_thread_id,
-                        draft_ref.provider_draft_id,
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception("Failed to create agent draft for band=%s", band_id)
-                    band.needs_review = True
+                transition_log.info(
+                    "AGENT_DRAFT_CREATED (local) | band=%s thread=%s",
+                    band_id,
+                    thread.provider_thread_id,
+                )
+                emit_event(
+                    "ai_drafted",
+                    band_id=band.id,
+                    band_name=band.name,
+                    stage=decision.stage_update.value if decision.stage_update else None,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("Failed to create agent draft for band=%s", band_id)
+                band.needs_review = True
 
         elif decision.action == NextAction.needs_human:
             band.needs_review = True
+
+        # Refresh insights + backfill profile fields off the latest thread state
+        # so band.name / contact_name / w9_name are pre-filled by the time the
+        # card reaches the roster.
+        try:
+            from .insights import get_or_refresh_insights
+
+            get_or_refresh_insights(s, band, thread)
+        except Exception:  # noqa: BLE001
+            log.exception("Insights refresh failed for band=%s", band_id)

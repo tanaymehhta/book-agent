@@ -117,6 +117,7 @@ class Message(Base):
     body_text: Mapped[str | None] = mapped_column(Text)
     body_html: Mapped[str | None] = mapped_column(Text)
     snippet: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     headers: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     classification: Mapped[Classification | None] = mapped_column(_pg_enum(Classification, "classification"))

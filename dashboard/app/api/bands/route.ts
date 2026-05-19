@@ -17,12 +17,12 @@ export async function GET() {
       b.needs_review                AS needs_review,
       b.conversation_stage::text    AS conversation_stage,
       b.last_activity_at            AS last_activity_at,
-      m.snippet                     AS last_snippet,
+      COALESCE(m.summary, m.snippet) AS last_snippet,
       m.direction::text             AS last_direction,
       m.sent_at                     AS last_sent_at
     FROM bands b
     LEFT JOIN LATERAL (
-      SELECT mm.snippet, mm.direction, mm.sent_at
+      SELECT mm.snippet, mm.summary, mm.direction, mm.sent_at
       FROM messages mm
       JOIN email_threads t ON t.id = mm.thread_id
       WHERE t.band_id = b.id

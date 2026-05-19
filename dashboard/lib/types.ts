@@ -80,4 +80,5 @@ export interface DraftRow {
   body_text: string;
   created_at: string;
   updated_at: string;
+  created_by?: 'agent' | 'human';
 }

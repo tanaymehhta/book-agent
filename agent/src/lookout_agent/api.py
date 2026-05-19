@@ -11,6 +11,7 @@ from .db import session_scope
 from .db.enums import BandStatus, DraftCreatedBy, DraftStatus, MessageDirection
 from .db.models import Band, Draft, EmailThread, Message
 from .email import get_provider
+from .events import emit_event
 from .insights import get_or_refresh_insights
 
 
@@ -204,6 +205,9 @@ def get_band_insights(band_id: str):
 
 @app.post("/bands/{band_id}/drafts", response_model=DraftOut)
 def create_reply_draft(band_id: str, payload: CreateDraftIn):
+    """Save a dashboard-only draft. Never touches Gmail's Drafts folder."""
+    from uuid import uuid4
+
     try:
         band_uuid = UUID(band_id)
     except ValueError as e:  # noqa: BLE001
@@ -224,33 +228,11 @@ def create_reply_draft(band_id: str, payload: CreateDraftIn):
         if not to_email:
             raise HTTPException(status_code=400, detail="Band has no primary_email")
 
-        last_inbound_msg_id = (
-            s.execute(
-                select(Message.internet_message_id)
-                .where(
-                    Message.thread_id == thread.id,
-                    Message.direction == MessageDirection.inbound,
-                    Message.internet_message_id.is_not(None),
-                )
-                .order_by(desc(Message.sent_at))
-                .limit(1)
-            )
-            .scalar_one_or_none()
-        )
-
-        draft_ref = provider.create_draft(
-            body_text=payload.body_text,
-            reply_to_thread_id=thread.provider_thread_id,
-            to=[to_email],
-            subject=thread.subject or "",
-            in_reply_to_message_id=last_inbound_msg_id,
-        )
-
         draft = Draft(
             band_id=band.id,
             thread_id=thread.id,
             provider=provider.provider_name,
-            provider_draft_id=draft_ref.provider_draft_id,
+            provider_draft_id=f"local:{uuid4()}",
             body_text=payload.body_text,
             status=DraftStatus.pending,
             created_by=DraftCreatedBy.human,
@@ -274,12 +256,11 @@ def create_reply_draft(band_id: str, payload: CreateDraftIn):
 
 @app.patch("/drafts/{draft_id}", response_model=DraftOut)
 def update_draft(draft_id: str, payload: UpdateDraftIn):
+    """Update draft body text in our DB. No Gmail interaction."""
     try:
         draft_uuid = UUID(draft_id)
     except ValueError as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Invalid draft_id") from e
-
-    provider = get_provider()
 
     with session_scope() as s:
         draft = s.get(Draft, draft_uuid)
@@ -287,10 +268,7 @@ def update_draft(draft_id: str, payload: UpdateDraftIn):
             raise HTTPException(status_code=404, detail="Draft not found")
         if draft.status != DraftStatus.pending:
             raise HTTPException(status_code=400, detail=f"Draft not editable (status={draft.status.value})")
-        if draft.provider != provider.provider_name:
-            raise HTTPException(status_code=400, detail="Provider mismatch for this agent instance")
 
-        provider.update_draft(draft.provider_draft_id, payload.body_text)
         draft.body_text = payload.body_text
         draft.updated_at = datetime.now(timezone.utc)
 
@@ -307,6 +285,7 @@ def update_draft(draft_id: str, payload: UpdateDraftIn):
 
 @app.post("/drafts/{draft_id}/send")
 def send_draft(draft_id: str):
+    """Send a draft as a fresh outbound message; no Gmail draft involved."""
     try:
         draft_uuid = UUID(draft_id)
     except ValueError as e:  # noqa: BLE001
@@ -325,36 +304,68 @@ def send_draft(draft_id: str):
 
         band = s.get(Band, draft.band_id)
         thread = s.get(EmailThread, draft.thread_id) if draft.thread_id else None
+        if band is None or thread is None:
+            raise HTTPException(status_code=400, detail="Draft missing band or thread")
 
-        sent = provider.send_draft(draft.provider_draft_id)
+        to_email = (band.primary_email or "").strip()
+        if not to_email:
+            raise HTTPException(status_code=400, detail="Band has no primary_email")
 
-        if thread is not None:
-            msg = Message(
-                thread_id=thread.id,
-                provider_message_id=sent.provider_message_id,
-                direction=MessageDirection.outbound,
-                from_address=sent.from_address.email.lower(),
-                to_addresses=[a.email for a in sent.to_addresses],
-                cc_addresses=[a.email for a in sent.cc_addresses],
-                subject=sent.subject,
-                body_text=sent.body_text,
-                body_html=sent.body_html,
-                snippet=sent.snippet,
-                sent_at=sent.sent_at,
-                headers=sent.headers,
-                classification=None,
-                auto_sent=False,
+        last_inbound_msg_id = (
+            s.execute(
+                select(Message.internet_message_id)
+                .where(
+                    Message.thread_id == thread.id,
+                    Message.direction == MessageDirection.inbound,
+                    Message.internet_message_id.is_not(None),
+                )
+                .order_by(desc(Message.sent_at))
+                .limit(1)
             )
-            s.add(msg)
-            thread.last_message_at = sent.sent_at
+            .scalar_one_or_none()
+        )
+
+        sent = provider.send_message(
+            to=[to_email],
+            subject=thread.subject or "",
+            body_text=draft.body_text,
+            reply_to_thread_id=thread.provider_thread_id,
+            in_reply_to_message_id=last_inbound_msg_id,
+        )
+
+        msg = Message(
+            thread_id=thread.id,
+            provider_message_id=sent.provider_message_id,
+            direction=MessageDirection.outbound,
+            from_address=sent.from_address.email.lower(),
+            to_addresses=[a.email for a in sent.to_addresses],
+            cc_addresses=[a.email for a in sent.cc_addresses],
+            subject=sent.subject,
+            body_text=sent.body_text,
+            body_html=sent.body_html,
+            snippet=sent.snippet,
+            sent_at=sent.sent_at,
+            headers=sent.headers,
+            classification=None,
+            auto_sent=False,
+        )
+        s.add(msg)
+        thread.last_message_at = sent.sent_at
 
         draft.status = DraftStatus.sent
         draft.sent_at = datetime.now(timezone.utc)
         draft.updated_at = datetime.now(timezone.utc)
 
-        if band is not None:
-            band.last_activity_at = sent.sent_at
-            band.draft_ready = False
+        band.last_activity_at = sent.sent_at
+        band.draft_ready = False
+
+        emit_event(
+            "laura_sent",
+            band_id=band.id,
+            band_name=band.name,
+            to=to_email,
+            from_ai_draft=(draft.created_by == DraftCreatedBy.agent),
+        )
 
         return {"ok": True}
 
@@ -422,3 +433,126 @@ def update_band_profile(band_id: str, payload: UpdateBandProfileIn):
         band.updated_at = datetime.now(timezone.utc)
         s.flush()
         return _serialize_band_profile(band)
+
+
+# ---------------------------------------------------------------------------
+# Events feed — read-only activity log for external monitors (e.g. Hermes).
+# Read-only. No effect on the email pipeline.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/events/health")
+def events_health():
+    """Self-check for the events feed. Hermes can hit this on startup to
+    confirm both endpoint and table are wired correctly.
+
+    Returns one of:
+      ok   — table exists, query worked
+      degraded — table missing or unreadable (feed will return empty)
+    """
+    from sqlalchemy import text
+
+    try:
+        with session_scope() as s:
+            row = s.execute(
+                text(
+                    """
+                    SELECT
+                      COUNT(*)                     AS total,
+                      MAX(occurred_at)             AS latest_at,
+                      COUNT(*) FILTER (
+                        WHERE occurred_at > now() - interval '24 hours'
+                      )                            AS last_24h
+                    FROM events
+                    """
+                )
+            ).mappings().one()
+            return {
+                "status": "ok",
+                "environment_hint": _environment_hint(),
+                "total_events": int(row["total"] or 0),
+                "events_last_24h": int(row["last_24h"] or 0),
+                "latest_event_at": row["latest_at"].isoformat() if row["latest_at"] else None,
+                "message": "Events feed is live and the table is reachable.",
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "degraded",
+            "environment_hint": _environment_hint(),
+            "total_events": 0,
+            "events_last_24h": 0,
+            "latest_event_at": None,
+            "message": f"Events table not yet available: {type(exc).__name__}",
+        }
+
+
+def _environment_hint() -> str:
+    """Best-effort label so Hermes can tell which env it just queried.
+    Uses GMAIL_USER_EMAIL since that's the most reliable distinguisher
+    between staging (tanaymehta1705@) and production (lookoutfarm.bookings@)."""
+    import os
+
+    mailbox = (os.environ.get("GMAIL_USER_EMAIL") or "").lower()
+    if "lookoutfarm" in mailbox:
+        return "production"
+    if "tanaymehta" in mailbox:
+        return "staging"
+    return mailbox or "unknown"
+
+
+@app.get("/events")
+def get_events(since: str | None = None, limit: int = 200):
+    """Return recent events, newest first.
+
+    Query params:
+      since: ISO-8601 timestamp. Only events with occurred_at > since are returned.
+      limit: max rows (default 200, max 1000).
+    """
+    from sqlalchemy import text
+
+    capped = max(1, min(int(limit or 200), 1000))
+
+    try:
+        with session_scope() as s:
+            if since:
+                rows = s.execute(
+                    text(
+                        """
+                        SELECT id, occurred_at, type, band_id, band_name, payload
+                        FROM events
+                        WHERE occurred_at > CAST(:since AS timestamptz)
+                        ORDER BY occurred_at DESC, id DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {"since": since, "lim": capped},
+                ).mappings().all()
+            else:
+                rows = s.execute(
+                    text(
+                        """
+                        SELECT id, occurred_at, type, band_id, band_name, payload
+                        FROM events
+                        ORDER BY occurred_at DESC, id DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {"lim": capped},
+                ).mappings().all()
+
+            return {
+                "events": [
+                    {
+                        "id": r["id"],
+                        "occurred_at": r["occurred_at"].isoformat() if r["occurred_at"] else None,
+                        "type": r["type"],
+                        "band_id": str(r["band_id"]) if r["band_id"] else None,
+                        "band_name": r["band_name"],
+                        "payload": r["payload"] or {},
+                    }
+                    for r in rows
+                ]
+            }
+    except Exception:  # noqa: BLE001
+        # Feed is best-effort. Never 500 the route just because the table is missing.
+        return {"events": [], "error": "events feed unavailable"}

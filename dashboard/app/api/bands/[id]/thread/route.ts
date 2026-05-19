@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import type { ThreadDetail, ThreadMessageRow } from '@/lib/types';
+import type { DraftRow, ThreadDetail, ThreadMessageRow } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,12 +49,35 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
     [thread.thread_id],
   );
 
+  const draftRows = await query<DraftRow & { created_by: string }>(
+    `
+    SELECT
+      d.id::text                  AS id,
+      d.provider                  AS provider,
+      d.provider_draft_id         AS provider_draft_id,
+      d.status::text              AS status,
+      d.body_text                 AS body_text,
+      d.created_at                AS created_at,
+      d.updated_at                AS updated_at,
+      d.created_by::text          AS created_by
+    FROM drafts d
+    WHERE d.thread_id = $1::uuid
+      AND d.status = 'pending'
+    ORDER BY d.created_at DESC
+    LIMIT 1
+    `,
+    [thread.thread_id],
+  );
+
+  const pending_draft = draftRows[0] ?? null;
+
   const payload: ThreadDetail = {
     thread_id: thread.thread_id,
     provider: thread.provider,
     provider_thread_id: thread.provider_thread_id,
     subject: thread.subject,
     messages,
+    pending_draft,
   };
 
   return NextResponse.json(payload);
